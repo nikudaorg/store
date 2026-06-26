@@ -1,0 +1,21 @@
+{
+  "name": "versioned-entity-store",
+  "version": "0.1.0",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@libsql/client": "^0.17.4",
+    "drizzle-orm": "^0.45.2"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.30",
+    "fast-check": "^3.23.2",
+    "typescript": "^5.8.3",
+    "vitest": "^3.2.2"
+  },
+  "packageManager": "pnpm@10.12.1"
+}
