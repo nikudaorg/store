@@ -91,23 +91,42 @@ export interface VerifyResult {
 }
 
 export interface VersionedEntityStore {
+  /** Creates an entity and its initial revision from the supplied content. */
   readonly create: (input: CreateEntityInput) => Promise<CreateEntityResult>;
-  readonly commit: (input: CommitRevisionInput) => Promise<CommitRevisionResult>;
+
+  /** Creates a new immutable revision and updates the entity's current head. */
+  readonly commit: (
+    input: CommitRevisionInput
+  ) => Promise<CommitRevisionResult>;
+
+  /** Returns the metadata and current state of an entity. */
   readonly getEntity: (entityId: EntityId) => Promise<EntityRecord>;
+
+  /** Returns a specific revision, or the entity's current head by default. */
   readonly getRevision: (
     entityId: EntityId,
     revision?: RevisionId | 'head'
   ) => Promise<RevisionRecord>;
+
+  /** Returns the revisions belonging to an entity. */
   readonly listRevisions: (entityId: EntityId) => Promise<RevisionRecord[]>;
+
+  /** Opens a readable stream for a specific revision or the current head. */
   readonly openRead: (
     entityId: EntityId,
     revision?: RevisionId | 'head'
   ) => Promise<NodeJS.ReadableStream>;
+
+  /** Reads a specific revision or the current head fully into memory. */
   readonly readBytes: (
     entityId: EntityId,
     revision?: RevisionId | 'head'
   ) => Promise<Uint8Array>;
+
+  /** Reconstructs a revision and writes it to the requested filesystem path. */
   readonly materializeToPath: (input: MaterializeInput) => Promise<void>;
+
+  /** Checks stored metadata and content objects for integrity problems. */
   readonly verify: (input?: VerifyInput) => Promise<VerifyResult>;
 }
 
