@@ -20,7 +20,7 @@ import type {
   MaterializeInput,
   RevisionId,
   RevisionRecord,
-  VersionedEntityStore
+  Connection
 } from './api/types.js';
 import { openDatabase } from './catalog/database.js';
 import { createRepositories } from './catalog/repositories.js';
@@ -54,7 +54,7 @@ export type {
   VerifyInput,
   VerifyIssue,
   VerifyResult,
-  VersionedEntityStore
+  Connection as VersionedEntityStore
 } from './api/types.js';
 
 const defaultReadBytesLimit = 64 * 1024 * 1024;
@@ -64,7 +64,9 @@ const stringifyMetadata = (metadata?: Record<string, unknown>): string =>
 
 const assertOpen = (closed: boolean): void => {
   if (closed) {
-    throw Object.assign(new Error('The store is closed'), { code: 'closed' as const });
+    throw Object.assign(new Error('The store is closed'), {
+      code: 'closed' as const
+    });
   }
 };
 
@@ -83,9 +85,12 @@ const assertCanMaterialize = async (
   overwrite: boolean
 ): Promise<void> => {
   if (isUnsafeRelativePath(destinationPath)) {
-    throw Object.assign(new Error(`Unsafe materialization path: ${destinationPath}`), {
-      code: 'unsafePath' as const
-    });
+    throw Object.assign(
+      new Error(`Unsafe materialization path: ${destinationPath}`),
+      {
+        code: 'unsafePath' as const
+      }
+    );
   }
   if (!overwrite) {
     try {
@@ -110,177 +115,196 @@ const fsyncDirectory = (path: string): void => {
   }
 };
 
-export const createVersionedEntityStore = async <Result>(
-  options: CreateVersionedEntityStoreOptions,
-  useStore: (store: VersionedEntityStore) => Result | Promise<Result>
-): Promise<Awaited<Result>> => {
-  const root = resolve(options.root);
-  const catalog = openDatabase(root);
-  const objectStore = createObjectStore(root);
-  const repositories = createRepositories(catalog.db);
-  const readBytesLimit = options.readBytesLimit ?? defaultReadBytesLimit;
-  let closed = false;
+export const createStore =
+  <Result>(options: CreateVersionedEntityStoreOptions) =>
+  async (
+    callback: (conn: Connection) => Result | Promise<Result>
+  ): Promise<Awaited<Result>> => {
+    const root = resolve(options.root);
+    const catalog = openDatabase(root);
+    const objectStore = createObjectStore(root);
+    const repositories = createRepositories(catalog.db);
+    const readBytesLimit = options.readBytesLimit ?? defaultReadBytesLimit;
+    let closed = false;
 
-  const ensureReady = async (): Promise<void> => {
-    assertOpen(closed);
-    await catalog.ready;
-    assertOpen(closed);
-  };
-
-  const create = async (input: CreateEntityInput): Promise<CreateEntityResult> => {
-    await ensureReady();
-    const prepared = await ingestContent(objectStore, input.content);
-    const now = Date.now();
-    const entityId = createRandomId('ent');
-    const revisionId = createRandomId('rev');
-    const originalName = input.originalName ?? inferOriginalName(input.content);
-    const sourceKind = inferSourceKind(input.content);
-
-    await repositories.createEntityRevision({
-      entityId,
-      revisionId,
-      manifestHash: prepared.manifestObject.hash,
-      byteLength: prepared.manifest.byteLength,
-      createdAt: now,
-      originalName,
-      mediaType: input.mediaType,
-      entityMetadataJson: stringifyMetadata(input.metadata),
-      revisionMetadataJson: stringifyMetadata(input.metadata),
-      sourceKind,
-      objects: [...prepared.chunkObjects, prepared.manifestObject]
-    });
-
-    return { entityId, revisionId };
-  };
-
-  const commit = async (
-    input: CommitRevisionInput
-  ): Promise<CommitRevisionResult> => {
-    await ensureReady();
-    await repositories.getEntity(input.entityId);
-    const previousHead = await repositories.getHeadRevisionId(input.entityId);
-    if (input.expectedHead !== undefined && input.expectedHead !== previousHead) {
-      throw Object.assign(
-        new Error(`Expected head ${input.expectedHead}, found ${previousHead}`),
-        { code: 'headConflict' as const }
-      );
-    }
-
-    const prepared = await ingestContent(objectStore, input.content);
-    const now = Date.now();
-    const revisionId = createRandomId('rev');
-
-    await repositories.commitEntityRevision({
-      revisionId,
-      entityId: input.entityId,
-      previousHead,
-      manifestHash: prepared.manifestObject.hash,
-      byteLength: prepared.manifest.byteLength,
-      createdAt: now,
-      sourceKind: input.sourceKind ?? inferSourceKind(input.content),
-      metadataJson: stringifyMetadata(input.metadata),
-      objects: [...prepared.chunkObjects, prepared.manifestObject]
-    });
-
-    return { entityId: input.entityId, revisionId, previousHead };
-  };
-
-  const getEntity = async (entityId: EntityId): Promise<EntityRecord> => {
-    await ensureReady();
-    return repositories.getEntity(entityId);
-  };
-
-  const getRevision = async (
-    entityId: EntityId,
-    revision?: RevisionId | 'head'
-  ): Promise<RevisionRecord> => {
-    await ensureReady();
-    return repositories.getRevision(entityId, revision);
-  };
-
-  const listRevisions = async (entityId: EntityId): Promise<RevisionRecord[]> => {
-    await ensureReady();
-    return repositories.listRevisions(entityId);
-  };
-
-  const openRead = async (
-    entityId: EntityId,
-    revision?: RevisionId | 'head'
-  ): Promise<NodeJS.ReadableStream> => {
-    await ensureReady();
-    const record = await repositories.getRevision(entityId, revision);
-    const manifest = readManifest(objectStore, record.manifestHash);
-    return openRevisionStream(objectStore, manifest);
-  };
-
-  const readBytes = async (
-    entityId: EntityId,
-    revision?: RevisionId | 'head'
-  ): Promise<Uint8Array> => {
-    await ensureReady();
-    const record = await repositories.getRevision(entityId, revision);
-    if (record.byteLength > readBytesLimit) {
-      throw Object.assign(
-        new Error(`Revision ${record.id} is larger than readBytesLimit`),
-        { code: 'readLimitExceeded' as const }
-      );
-    }
-    const manifest = readManifest(objectStore, record.manifestHash);
-    return readRevisionBytes(objectStore, manifest);
-  };
-
-  const materializeToPath = async (input: MaterializeInput): Promise<void> => {
-    await ensureReady();
-    await assertCanMaterialize(input.destinationPath, input.overwrite ?? false);
-    mkdirSync(dirname(input.destinationPath), { recursive: true });
-    const destination = resolve(input.destinationPath);
-    const temporaryPath = `${destination}.tmp-${process.pid}-${Date.now()}`;
-    const stream = await openRead(input.entityId, input.revision);
-    try {
-      await pipeline(stream, createWriteStream(temporaryPath, { flags: 'wx' }));
-      const fd = openSync(temporaryPath, 'r');
-      try {
-        fsyncSync(fd);
-      } finally {
-        closeSync(fd);
-      }
-      await rename(temporaryPath, destination);
-      fsyncDirectory(dirname(destination));
-    } catch (error) {
-      await rm(temporaryPath, { force: true });
-      throw error;
-    }
-  };
-
-  const verify = async (input?: Parameters<VersionedEntityStore['verify']>[0]) => {
-    await ensureReady();
-    return verifyStore(objectStore, repositories, input);
-  };
-
-  const closeStore = async (): Promise<void> => {
-    if (!closed) {
+    const ensureReady = async (): Promise<void> => {
+      assertOpen(closed);
       await catalog.ready;
-      catalog.client.close();
-      closed = true;
+      assertOpen(closed);
+    };
+
+    const create = async (
+      input: CreateEntityInput
+    ): Promise<CreateEntityResult> => {
+      await ensureReady();
+      const prepared = await ingestContent(objectStore, input.content);
+      const now = Date.now();
+      const entityId = createRandomId('ent');
+      const revisionId = createRandomId('rev');
+      const originalName =
+        input.originalName ?? inferOriginalName(input.content);
+      const sourceKind = inferSourceKind(input.content);
+
+      await repositories.createEntityRevision({
+        entityId,
+        revisionId,
+        manifestHash: prepared.manifestObject.hash,
+        byteLength: prepared.manifest.byteLength,
+        createdAt: now,
+        originalName,
+        mediaType: input.mediaType,
+        entityMetadataJson: stringifyMetadata(input.metadata),
+        revisionMetadataJson: stringifyMetadata(input.metadata),
+        sourceKind,
+        objects: [...prepared.chunkObjects, prepared.manifestObject]
+      });
+
+      return { entityId, revisionId };
+    };
+
+    const commit = async (
+      input: CommitRevisionInput
+    ): Promise<CommitRevisionResult> => {
+      await ensureReady();
+      await repositories.getEntity(input.entityId);
+      const previousHead = await repositories.getHeadRevisionId(input.entityId);
+      if (
+        input.expectedHead !== undefined &&
+        input.expectedHead !== previousHead
+      ) {
+        throw Object.assign(
+          new Error(
+            `Expected head ${input.expectedHead}, found ${previousHead}`
+          ),
+          { code: 'headConflict' as const }
+        );
+      }
+
+      const prepared = await ingestContent(objectStore, input.content);
+      const now = Date.now();
+      const revisionId = createRandomId('rev');
+
+      await repositories.commitEntityRevision({
+        revisionId,
+        entityId: input.entityId,
+        previousHead,
+        manifestHash: prepared.manifestObject.hash,
+        byteLength: prepared.manifest.byteLength,
+        createdAt: now,
+        sourceKind: input.sourceKind ?? inferSourceKind(input.content),
+        metadataJson: stringifyMetadata(input.metadata),
+        objects: [...prepared.chunkObjects, prepared.manifestObject]
+      });
+
+      return { revisionId, previousHead };
+    };
+
+    const getEntity = async (entityId: EntityId): Promise<EntityRecord> => {
+      await ensureReady();
+      return repositories.getEntity(entityId);
+    };
+
+    const getRevision = async (
+      entityId: EntityId,
+      revision?: RevisionId | 'head'
+    ): Promise<RevisionRecord> => {
+      await ensureReady();
+      return repositories.getRevision(entityId, revision);
+    };
+
+    const listRevisions = async (
+      entityId: EntityId
+    ): Promise<RevisionRecord[]> => {
+      await ensureReady();
+      return repositories.listRevisions(entityId);
+    };
+
+    const openRead = async (
+      entityId: EntityId,
+      revision?: RevisionId | 'head'
+    ): Promise<NodeJS.ReadableStream> => {
+      await ensureReady();
+      const record = await repositories.getRevision(entityId, revision);
+      const manifest = readManifest(objectStore, record.manifestHash);
+      return openRevisionStream(objectStore, manifest);
+    };
+
+    const readBytes = async (
+      entityId: EntityId,
+      revision?: RevisionId | 'head'
+    ): Promise<Uint8Array> => {
+      await ensureReady();
+      const record = await repositories.getRevision(entityId, revision);
+      if (record.byteLength > readBytesLimit) {
+        throw Object.assign(
+          new Error(`Revision ${record.id} is larger than readBytesLimit`),
+          { code: 'readLimitExceeded' as const }
+        );
+      }
+      const manifest = readManifest(objectStore, record.manifestHash);
+      return readRevisionBytes(objectStore, manifest);
+    };
+
+    const materializeToPath = async (
+      input: MaterializeInput
+    ): Promise<void> => {
+      await ensureReady();
+      await assertCanMaterialize(
+        input.destinationPath,
+        input.overwrite ?? false
+      );
+      mkdirSync(dirname(input.destinationPath), { recursive: true });
+      const destination = resolve(input.destinationPath);
+      const temporaryPath = `${destination}.tmp-${process.pid}-${Date.now()}`;
+      const stream = await openRead(input.entityId, input.revision);
+      try {
+        await pipeline(
+          stream,
+          createWriteStream(temporaryPath, { flags: 'wx' })
+        );
+        const fd = openSync(temporaryPath, 'r');
+        try {
+          fsyncSync(fd);
+        } finally {
+          closeSync(fd);
+        }
+        await rename(temporaryPath, destination);
+        fsyncDirectory(dirname(destination));
+      } catch (error) {
+        await rm(temporaryPath, { force: true });
+        throw error;
+      }
+    };
+
+    const verify = async (input?: Parameters<Connection['verify']>[0]) => {
+      await ensureReady();
+      return verifyStore(objectStore, repositories, input);
+    };
+
+    const closeStore = async (): Promise<void> => {
+      if (!closed) {
+        await catalog.ready;
+        catalog.client.close();
+        closed = true;
+      }
+    };
+
+    const store: Connection = {
+      create,
+      commit,
+      getEntity,
+      getRevision,
+      listRevisions,
+      openRead,
+      readBytes,
+      materializeToPath,
+      verify
+    };
+
+    try {
+      await catalog.ready;
+      return await callback(store);
+    } finally {
+      await closeStore();
     }
   };
-
-  const store: VersionedEntityStore = {
-    create,
-    commit,
-    getEntity,
-    getRevision,
-    listRevisions,
-    openRead,
-    readBytes,
-    materializeToPath,
-    verify
-  };
-
-  try {
-    await catalog.ready;
-    return await useStore(store);
-  } finally {
-    await closeStore();
-  }
-};

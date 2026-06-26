@@ -252,7 +252,6 @@ interface CommitRevisionInput {
 }
 
 interface CommitRevisionResult {
-  entityId: EntityId;
   revisionId: RevisionId;
   previousHead: RevisionId;
 }

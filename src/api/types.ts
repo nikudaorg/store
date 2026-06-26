@@ -31,7 +31,6 @@ export interface CommitRevisionInput {
 }
 
 export interface CommitRevisionResult {
-  readonly entityId: EntityId;
   readonly revisionId: RevisionId;
   readonly previousHead: RevisionId;
 }
@@ -90,7 +89,7 @@ export interface VerifyResult {
   readonly issues: readonly VerifyIssue[];
 }
 
-export interface VersionedEntityStore {
+export interface Connection {
   /** Creates an entity and its initial revision from the supplied content. */
   readonly create: (input: CreateEntityInput) => Promise<CreateEntityResult>;
 
