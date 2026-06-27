@@ -1,18 +1,58 @@
 {
-  "name": "versioned-entity-store",
+  "name": "nikuda-store",
   "version": "0.1.0",
+  "description": "A local, content-addressed store for immutable file and byte revisions.",
   "type": "module",
-  "private": true,
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist"
+  ],
+  "sideEffects": false,
   "scripts": {
-    "build": "tsc -p tsconfig.json",
-    "test": "vitest run"
+    "clean": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\"",
+    "build": "pnpm run clean && tsc -p tsconfig.json",
+    "test": "vitest run",
+    "prepack": "pnpm run build",
+    "prepublishOnly": "pnpm test"
+  },
+  "keywords": [
+    "content-addressable-storage",
+    "file-storage",
+    "local-first",
+    "revision",
+    "versioning"
+  ],
+  "author": "nikudaorg",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/nikudaorg/store.git"
+  },
+  "bugs": {
+    "url": "https://github.com/nikudaorg/store/issues"
+  },
+  "homepage": "https://github.com/nikudaorg/store#readme",
+  "engines": {
+    "node": ">=18"
+  },
+  "publishConfig": {
+    "access": "public"
   },
   "dependencies": {
     "@libsql/client": "^0.17.4",
+    "@types/node": "^22.15.30",
     "drizzle-orm": "^0.45.2"
   },
   "devDependencies": {
-    "@types/node": "^22.15.30",
     "fast-check": "^3.23.2",
     "typescript": "^5.8.3",
     "vitest": "^3.2.2"

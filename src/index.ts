@@ -51,6 +51,7 @@ export type {
   MaterializeInput,
   RevisionId,
   RevisionRecord,
+  SourceKind,
   VerifyInput,
   VerifyIssue,
   VerifyResult,
