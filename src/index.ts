@@ -116,8 +116,8 @@ const fsyncDirectory = (path: string): void => {
 };
 
 export const createStore =
-  <Result>(options: CreateVersionedEntityStoreOptions) =>
-  async (
+  (options: CreateVersionedEntityStoreOptions) =>
+  async <Result>(
     callback: (conn: Connection) => Result | Promise<Result>
   ): Promise<Awaited<Result>> => {
     const root = resolve(options.root);
