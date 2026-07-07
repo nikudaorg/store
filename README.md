@@ -1,8 +1,8 @@
 # nikuda-store
 
-`nikuda-store` is a local, content-addressed store for files, text, and byte
-arrays. It keeps immutable revisions, deduplicates unchanged content chunks,
-and stores the revision catalog in SQLite.
+`nikuda-store` is a local, content-addressed store for immutable files, text,
+and byte arrays. It deduplicates content chunks and keeps a small SQLite
+catalog.
 
 The package is ESM-only and requires Node.js 18 or newer.
 
@@ -19,23 +19,14 @@ import { createStore } from 'nikuda-store';
 
 const store = createStore({ root: './data' });
 
-const created = await store(async (connection) => {
-  return connection.create({
-    content: { type: 'text', text: 'First version' },
-    originalName: 'note.txt',
-    mediaType: 'text/plain',
-    metadata: { owner: 'example' }
-  });
-});
+const fileId = await store((connection) =>
+  connection.create({ type: 'text', text: 'Hello store!' })
+);
 
 await store(async (connection) => {
-  await connection.commit({
-    entityId: created.entityId,
-    expectedHead: created.revisionId,
-    content: { type: 'text', text: 'Second version' }
-  });
+  await connection.setRoot(fileId);
 
-  const bytes = await connection.readBytes(created.entityId);
+  const bytes = await connection.readBytesRoot();
   console.log(Buffer.from(bytes).toString('utf8'));
 });
 ```
@@ -46,18 +37,15 @@ finishes, including when it throws.
 
 ## Content sources
 
-Create and commit operations accept text, bytes, paths, and Node.js readable
-streams:
+`create` accepts text, bytes, paths, and Node.js readable streams:
 
 ```ts
 await store(async (connection) => {
-  await connection.create({
-    content: { type: 'path', path: './document.pdf' },
-    mediaType: 'application/pdf'
-  });
+  await connection.create({ type: 'path', path: './document.pdf' });
 
   await connection.create({
-    content: { type: 'bytes', bytes: new Uint8Array([1, 2, 3]) }
+    type: 'bytes',
+    bytes: new Uint8Array([1, 2, 3])
   });
 });
 ```
@@ -72,14 +60,13 @@ type ContentSource =
   | { type: 'stream'; stream: NodeJS.ReadableStream };
 ```
 
-## Reading revisions
+## Reading files
 
-`readBytes` reads a revision into memory. Use `openRead` for large content:
+`readBytes` reads a file into memory. Use `read` for large content:
 
 ```ts
 await store(async (connection) => {
-  const revision = await connection.getRevision(entityId, 'head');
-  const stream = await connection.openRead(entityId, revision.id);
+  const stream = await connection.read(fileId);
 
   for await (const chunk of stream) {
     // Process each chunk.
@@ -87,8 +74,8 @@ await store(async (connection) => {
 });
 ```
 
-The optional `readBytesLimit` prevents accidentally loading large revisions
-into memory:
+The optional `readBytesLimit` prevents accidentally loading large files into
+memory:
 
 ```ts
 const store = createStore({
@@ -97,58 +84,49 @@ const store = createStore({
 });
 ```
 
-The default limit is 64 MiB. It applies to `readBytes`, not `openRead`.
+The default limit is 64 MiB. It applies to `readBytes` and `readBytesRoot`, not
+to `read` or `readRoot`.
 
-## Optimistic concurrency
+## Root file
 
-Pass `expectedHead` when committing to reject writes based on a stale head:
-
-```ts
-await store(async (connection) => {
-  await connection.commit({
-    entityId,
-    expectedHead: currentRevisionId,
-    content: { type: 'text', text: 'Updated content' }
-  });
-});
-```
-
-A conflict throws an error whose `code` is `headConflict`.
-
-## Materializing a revision
+One stored file can be assigned as the global root:
 
 ```ts
 await store(async (connection) => {
-  await connection.materializeToPath({
-    entityId,
-    revision: 'head',
-    destinationPath: './output/document.pdf'
-  });
+  const fileId = await connection.create({ type: 'text', text: 'root' });
+  await connection.setRoot(fileId);
+
+  const rootBytes = await connection.readBytesRoot();
 });
 ```
 
-Existing files are not overwritten unless `overwrite: true` is supplied.
-
-## Integrity checks
-
-Verify every stored revision, or limit the check to one entity:
-
-```ts
-const result = await store((connection) => connection.verify());
-
-if (!result.ok) {
-  console.error(result.issues);
-}
-```
+Every root assignment is appended to the store's global metadata. The public API
+only exposes the current root for reading.
 
 ## API
 
 The package exports:
 
 - `createStore(options)`
-- `VersionedEntityStore`
-- input, result, record, ID, content, and verification types used by the
-  public API
+- `FileStore`
+- `ContentSource`
+- `CreateFileStoreOptions`
+- `FileId`
+- `FileRecord`
+
+The connection API is intentionally small:
+
+```ts
+interface FileStore {
+  create(content: ContentSource): Promise<FileId>;
+  read(fileId: FileId): Promise<NodeJS.ReadableStream>;
+  readBytes(fileId: FileId): Promise<Uint8Array>;
+  listFiles(): Promise<readonly FileRecord[]>;
+  setRoot(fileId: FileId): Promise<void>;
+  readRoot(): Promise<NodeJS.ReadableStream>;
+  readBytesRoot(): Promise<Uint8Array>;
+}
+```
 
 ## Storage
 

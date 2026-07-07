@@ -1,16 +1,19 @@
 import { Readable } from 'node:stream';
-import type { ContentHash } from '../api/types.js';
-import { decodeManifest, type RevisionManifestV1 } from '../domain/manifest.js';
+import {
+  decodeManifest,
+  type ContentHash,
+  type FileManifestV1
+} from '../domain/manifest.js';
 import type { ObjectStore } from '../storage/object-store.js';
 
 export const readManifest = (
   objectStore: ObjectStore,
   manifestHash: ContentHash
-): RevisionManifestV1 => decodeManifest(objectStore.read(manifestHash));
+): FileManifestV1 => decodeManifest(objectStore.read(manifestHash));
 
-export const openRevisionStream = (
+export const openFileStream = (
   objectStore: ObjectStore,
-  manifest: RevisionManifestV1
+  manifest: FileManifestV1
 ): NodeJS.ReadableStream => {
   async function* generate(): AsyncGenerator<Buffer> {
     let total = 0;
@@ -25,7 +28,7 @@ export const openRevisionStream = (
       yield bytes;
     }
     if (total !== manifest.byteLength) {
-      throw Object.assign(new Error('Revision byte length mismatch'), {
+      throw Object.assign(new Error('File byte length mismatch'), {
         code: 'contentIntegrity' as const
       });
     }
@@ -34,9 +37,9 @@ export const openRevisionStream = (
   return Readable.from(generate());
 };
 
-export const readRevisionBytes = async (
+export const readFileBytes = async (
   objectStore: ObjectStore,
-  manifest: RevisionManifestV1
+  manifest: FileManifestV1
 ): Promise<Uint8Array> => {
   const parts: Buffer[] = [];
   for (const chunk of manifest.chunks) {
@@ -50,7 +53,7 @@ export const readRevisionBytes = async (
   }
   const result = Buffer.concat(parts);
   if (result.byteLength !== manifest.byteLength) {
-    throw Object.assign(new Error('Revision byte length mismatch'), {
+    throw Object.assign(new Error('File byte length mismatch'), {
       code: 'contentIntegrity' as const
     });
   }

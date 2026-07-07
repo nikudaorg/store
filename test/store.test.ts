@@ -1,18 +1,18 @@
-import { createHash, randomBytes } from 'node:crypto';
-import { existsSync, rmSync, writeFileSync } from 'node:fs';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { randomBytes } from 'node:crypto';
+import { existsSync } from 'node:fs';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Readable } from 'node:stream';
 import { createClient, type Client } from '@libsql/client';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import fc from 'fast-check';
-import { createStore, type VersionedEntityStore } from '../src/index.js';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { createStore } from '../src/index.js';
 
 let root: string;
 
 const makeRoot = async (): Promise<string> =>
-  mkdtemp(join(tmpdir(), 'versioned-entity-store-'));
+  mkdtemp(join(tmpdir(), 'nikuda-store-'));
 
 const bytesOf = async (stream: NodeJS.ReadableStream): Promise<Buffer> => {
   const chunks: Buffer[] = [];
@@ -22,7 +22,8 @@ const bytesOf = async (stream: NodeJS.ReadableStream): Promise<Buffer> => {
   return Buffer.concat(chunks);
 };
 
-const openDb = (): Client => createClient({ url: `file:${join(root, 'database.sqlite')}` });
+const openDb = (): Client =>
+  createClient({ url: `file:${join(root, 'database.sqlite')}` });
 
 const objectCount = async (): Promise<number> => {
   const db = openDb();
@@ -46,6 +47,28 @@ const chunkCount = async (): Promise<number> => {
   }
 };
 
+const rootHistory = async (): Promise<
+  readonly { readonly fileId: string; readonly assignedAt: number }[]
+> => {
+  const db = openDb();
+  try {
+    const result = await db.execute({
+      sql: "SELECT value_json FROM global_metadata WHERE key = 'store'",
+      args: []
+    });
+    const json = String(result.rows[0]?.value_json);
+    const metadata = JSON.parse(json) as {
+      readonly rootHistory: readonly {
+        readonly fileId: string;
+        readonly assignedAt: number;
+      }[];
+    };
+    return metadata.rootHistory;
+  } finally {
+    db.close();
+  }
+};
+
 const objectPathForHash = (hash: string): string =>
   join(root, 'objects', 'sha256', hash.slice(0, 2), hash.slice(2, 4), hash);
 
@@ -60,22 +83,20 @@ afterEach(async () => {
   await rm(root, { recursive: true, force: true });
 });
 
-describe('versioned entity store', () => {
-  it('creates and reads a small text entity', async () => {
-    await store(async (store) => {
-      const created = await store.create({
-        content: { type: 'text', text: 'hello versioned world' },
-        mediaType: 'text/plain',
-        metadata: { purpose: 'test' }
+describe('file store', () => {
+  it('creates and reads a small text file', async () => {
+    await store(async (connection) => {
+      const fileId = await connection.create({
+        type: 'text',
+        text: 'hello immutable file'
       });
 
-      const entity = await store.getEntity(created.entityId);
-      const revision = await store.getRevision(created.entityId, 'head');
-      const bytes = await store.readBytes(created.entityId);
+      const bytes = await connection.readBytes(fileId);
+      const streamBytes = await bytesOf(await connection.read(fileId));
 
-      expect(entity.id).toBe(created.entityId);
-      expect(revision.id).toBe(created.revisionId);
-      expect(Buffer.from(bytes).toString('utf8')).toBe('hello versioned world');
+      expect(fileId).toMatch(/^file_/);
+      expect(Buffer.from(bytes).toString('utf8')).toBe('hello immutable file');
+      expect(streamBytes.toString('utf8')).toBe('hello immutable file');
     });
   });
 
@@ -84,202 +105,149 @@ describe('versioned entity store', () => {
     const expected = randomBytes(5 * 1024 * 1024 + 123);
     await writeFile(source, expected);
 
-    await store(async (store) => {
-      const created = await store.create({
-        content: { type: 'path', path: source }
-      });
-      const entity = await store.getEntity(created.entityId);
-      const reconstructed = await bytesOf(
-        await store.openRead(created.entityId)
-      );
+    await store(async (connection) => {
+      const fileId = await connection.create({ type: 'path', path: source });
+      const reconstructed = await bytesOf(await connection.read(fileId));
 
-      expect(entity.originalName).toBe('source.bin');
       expect(reconstructed.equals(expected)).toBe(true);
     });
   });
 
-  it('commits several revisions and recovers each exactly', async () => {
-    await store(async (store) => {
-      const first = Buffer.from('first');
-      const second = Buffer.from('second');
-      const third = Buffer.from('third');
-      const created = await store.create({
-        content: { type: 'bytes', bytes: first }
-      });
-      const committedSecond = await store.commit({
-        entityId: created.entityId,
-        content: { type: 'bytes', bytes: second }
-      });
-      const committedThird = await store.commit({
-        entityId: created.entityId,
-        content: { type: 'bytes', bytes: third }
-      });
+  it('lists stored immutable files in creation order', async () => {
+    await store(async (connection) => {
+      const first = await connection.create({ type: 'text', text: 'first' });
+      const second = await connection.create({ type: 'text', text: 'second' });
 
-      await expect(
-        store.readBytes(created.entityId, created.revisionId)
-      ).resolves.toEqual(first);
-      await expect(
-        store.readBytes(created.entityId, committedSecond.revisionId)
-      ).resolves.toEqual(second);
-      await expect(
-        store.readBytes(created.entityId, committedThird.revisionId)
-      ).resolves.toEqual(third);
-      await expect(store.listRevisions(created.entityId)).resolves.toHaveLength(
-        3
+      await expect(connection.listFiles()).resolves.toEqual([
+        expect.objectContaining({ id: first, byteLength: 5 }),
+        expect.objectContaining({ id: second, byteLength: 6 })
+      ]);
+    });
+  });
+
+  it('assigns root and records root history in global metadata', async () => {
+    await store(async (connection) => {
+      const first = await connection.create({ type: 'text', text: 'first' });
+      const second = await connection.create({ type: 'text', text: 'second' });
+
+      await connection.setRoot(first);
+      await expect(connection.readBytesRoot()).resolves.toEqual(
+        Buffer.from('first')
+      );
+
+      await connection.setRoot(second);
+      await expect(bytesOf(await connection.readRoot())).resolves.toEqual(
+        Buffer.from('second')
+      );
+
+      const history = await rootHistory();
+      expect(history.map((entry) => entry.fileId)).toEqual([first, second]);
+      expect(history.every((entry) => Number.isInteger(entry.assignedAt))).toBe(
+        true
       );
     });
   });
 
-  it('reuses unchanged chunks after inserting bytes near the beginning', async () => {
-    await store(async (store) => {
-      const base = randomBytes(4 * 1024 * 1024);
-      const changed = Buffer.concat([Buffer.from('inserted'), base]);
-      const created = await store.create({
-        content: { type: 'bytes', bytes: base }
+  it('rejects reading root before one is assigned', async () => {
+    await store(async (connection) => {
+      await expect(connection.readBytesRoot()).rejects.toMatchObject({
+        code: 'rootNotSet'
       });
-      const chunksAfterCreate = await chunkCount();
-
-      await store.commit({
-        entityId: created.entityId,
-        content: { type: 'bytes', bytes: changed }
-      });
-
-      expect(chunksAfterCreate).toBeGreaterThan(1);
-      await expect(chunkCount()).resolves.toBeLessThan(chunksAfterCreate * 1.5);
-      await expect(
-        bytesOf(await store.openRead(created.entityId))
-      ).resolves.toEqual(changed);
     });
   });
 
-  it('commits identical content twice without duplicating chunk storage', async () => {
-    await store(async (store) => {
+  it('rejects assigning a missing file as root', async () => {
+    await store(async (connection) => {
+      await expect(connection.setRoot('file_missing')).rejects.toMatchObject({
+        code: 'fileNotFound'
+      });
+    });
+  });
+
+  it(
+    'shares unchanged chunks between independently created files',
+    async () => {
+      await store(async (connection) => {
+        const base = randomBytes(4 * 1024 * 1024);
+        const changed = Buffer.concat([Buffer.from('inserted'), base]);
+        const baseId = await connection.create({ type: 'bytes', bytes: base });
+        const chunksAfterBase = await chunkCount();
+
+        const changedId = await connection.create({
+          type: 'bytes',
+          bytes: changed
+        });
+
+        expect(chunksAfterBase).toBeGreaterThan(1);
+        await expect(chunkCount()).resolves.toBeLessThan(chunksAfterBase * 1.5);
+        await expect(bytesOf(await connection.read(baseId))).resolves.toEqual(
+          base
+        );
+        await expect(bytesOf(await connection.read(changedId))).resolves.toEqual(
+          changed
+        );
+      });
+    },
+    15_000
+  );
+
+  it('does not duplicate chunk storage for identical files', async () => {
+    await store(async (connection) => {
       const content = randomBytes(800 * 1024);
-      const created = await store.create({
-        content: { type: 'bytes', bytes: content }
-      });
-      const chunksAfterCreate = await chunkCount();
+      await connection.create({ type: 'bytes', bytes: content });
+      const chunksAfterFirst = await chunkCount();
 
-      await store.commit({
-        entityId: created.entityId,
-        content: { type: 'bytes', bytes: content }
-      });
+      await connection.create({ type: 'bytes', bytes: content });
 
-      await expect(chunkCount()).resolves.toBe(chunksAfterCreate);
+      await expect(chunkCount()).resolves.toBe(chunksAfterFirst);
     });
   });
 
-  it('rejects a stale expected head', async () => {
-    await store(async (store) => {
-      const created = await store.create({
-        content: { type: 'text', text: 'a' }
-      });
-      await store.commit({
-        entityId: created.entityId,
-        expectedHead: created.revisionId,
-        content: { type: 'text', text: 'b' }
-      });
-
-      await expect(
-        store.commit({
-          entityId: created.entityId,
-          expectedHead: created.revisionId,
-          content: { type: 'text', text: 'c' }
-        })
-      ).rejects.toMatchObject({ code: 'headConflict' });
-    });
-  });
-
-  it('does not expose staged objects left before a SQLite transaction', async () => {
+  it('removes leftover staging files when opening the store', async () => {
     const staging = join(root, 'staging');
     await mkdir(staging, { recursive: true });
     await writeFile(join(staging, 'interrupted.tmp'), 'partial');
 
-    await store(async (store) => {
+    await store(async (connection) => {
       expect(existsSync(join(staging, 'interrupted.tmp'))).toBe(false);
-      await expect(store.verify()).resolves.toEqual({ ok: true, issues: [] });
+      await expect(connection.listFiles()).resolves.toEqual([]);
     });
   });
 
-  it('keeps committed revisions visible after reopening the store', async () => {
-    const created = await store((store) =>
-      store.create({ content: { type: 'text', text: 'persisted' } })
-    );
+  it('keeps files and root assignment visible after reopening the store', async () => {
+    const fileId = await store(async (connection) => {
+      const created = await connection.create({
+        type: 'text',
+        text: 'persisted'
+      });
+      await connection.setRoot(created);
+      return created;
+    });
 
-    await store(async (store) => {
-      await expect(store.readBytes(created.entityId)).resolves.toEqual(
+    await store(async (connection) => {
+      await expect(connection.readBytes(fileId)).resolves.toEqual(
+        Buffer.from('persisted')
+      );
+      await expect(connection.readBytesRoot()).resolves.toEqual(
         Buffer.from('persisted')
       );
     });
   });
 
-  it('detects corrupted and missing chunks', async () => {
-    await store(async (store) => {
-      const content = Buffer.from('detect corruption');
-      const chunkHash = createHash('sha256').update(content).digest('hex');
-      const created = await store.create({
-        content: { type: 'bytes', bytes: content }
-      });
-
-      writeFileSync(objectPathForHash(chunkHash), 'wrong');
-      const corrupt = await store.verify({ entityId: created.entityId });
-      expect(corrupt.ok).toBe(false);
-      expect(
-        corrupt.issues.some((issue) => issue.kind === 'corruptObject')
-      ).toBe(true);
-
-      rmSync(objectPathForHash(chunkHash), { force: true });
-      const missing = await store.verify({ entityId: created.entityId });
-      expect(missing.ok).toBe(false);
-      expect(
-        missing.issues.some((issue) => issue.kind === 'missingObject')
-      ).toBe(true);
-    });
-  });
-
-  it('rejects unsafe materialization paths and accidental overwrite', async () => {
-    await store(async (store) => {
-      const created = await store.create({
-        content: { type: 'text', text: 'file' }
-      });
-      const destination = join(root, 'out.txt');
-      await writeFile(destination, 'existing');
-
-      await expect(
-        store.materializeToPath({
-          entityId: created.entityId,
-          destinationPath: '../escape.txt'
-        })
-      ).rejects.toMatchObject({ code: 'unsafePath' });
-      await expect(
-        store.materializeToPath({
-          entityId: created.entityId,
-          destinationPath: destination
-        })
-      ).rejects.toMatchObject({ code: 'destinationExists' });
-
-      await store.materializeToPath({
-        entityId: created.entityId,
-        destinationPath: destination,
-        overwrite: true
-      });
-      await expect(readFile(destination, 'utf8')).resolves.toBe('file');
-    });
-  });
-
   it('supports stream sources and enforces readBytes size limits', async () => {
-    await store(async (store) => {
+    await store(async (connection) => {
       const content = Buffer.alloc(1024 * 1024 + 1, 7);
-      const created = await store.create({
-        content: { type: 'stream', stream: Readable.from([content]) }
+      const fileId = await connection.create({
+        type: 'stream',
+        stream: Readable.from([content])
       });
 
-      await expect(store.readBytes(created.entityId)).rejects.toMatchObject({
+      await expect(connection.readBytes(fileId)).rejects.toMatchObject({
         code: 'readLimitExceeded'
       });
-      await expect(
-        bytesOf(await store.openRead(created.entityId))
-      ).resolves.toEqual(content);
+      await expect(bytesOf(await connection.read(fileId))).resolves.toEqual(
+        content
+      );
     });
   });
 
@@ -288,11 +256,12 @@ describe('versioned entity store', () => {
       fc.asyncProperty(fc.uint8Array({ maxLength: 128 * 1024 }), async (value) => {
         const localRoot = await makeRoot();
         try {
-          await createStore({ root: localRoot })(async (store) => {
-            const created = await store.create({
-              content: { type: 'bytes', bytes: value }
+          await createStore({ root: localRoot })(async (connection) => {
+            const fileId = await connection.create({
+              type: 'bytes',
+              bytes: value
             });
-            const actual = await store.readBytes(created.entityId);
+            const actual = await connection.readBytes(fileId);
             expect(Buffer.from(actual).equals(Buffer.from(value))).toBe(true);
           });
         } finally {
@@ -303,26 +272,25 @@ describe('versioned entity store', () => {
     );
   });
 
-  it('stores all durable objects before making revisions visible', async () => {
-    await store(async (store) => {
+  it('stores durable objects before making files visible', async () => {
+    await store(async (connection) => {
       const before = await objectCount();
-      const created = await store.create({
-        content: { type: 'text', text: 'atomic' }
-      });
-      const revision = await store.getRevision(created.entityId);
+      const fileId = await connection.create({ type: 'text', text: 'atomic' });
       const after = await objectCount();
-      const manifestExists = existsSync(
-        objectPathForHash(revision.manifestHash)
-      );
+      const db = createClient({ url: `file:${join(root, 'database.sqlite')}` });
+      let manifestHash = '';
+      try {
+        const hash = await db.execute({
+          sql: 'SELECT manifest_hash FROM files WHERE id = ?',
+          args: [fileId]
+        });
+        manifestHash = String(hash.rows[0]?.manifest_hash);
+      } finally {
+        db.close();
+      }
 
       expect(after).toBeGreaterThan(before);
-      expect(manifestExists).toBe(true);
-      await expect(
-        store.verify({ entityId: created.entityId })
-      ).resolves.toEqual({
-        ok: true,
-        issues: []
-      });
+      expect(objectPathForHash(manifestHash)).toSatisfy(existsSync);
     });
   });
 });

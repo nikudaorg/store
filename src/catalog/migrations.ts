@@ -1,20 +1,14 @@
 import type { Client } from '@libsql/client';
 
+const initialStoreMetadata =
+  '{"schema":"storeMetadataV1","rootHistory":[]}';
+
 export const migrate = async (client: Client): Promise<void> => {
   await client.execute('PRAGMA foreign_keys = ON');
   await client.execute('PRAGMA journal_mode = WAL');
   await client.execute('PRAGMA synchronous = FULL');
 
   await client.batch([
-    `CREATE TABLE IF NOT EXISTS entities (
-      id TEXT PRIMARY KEY,
-      created_at INTEGER NOT NULL,
-      original_name TEXT,
-      media_type TEXT,
-      metadata_json TEXT NOT NULL,
-      deleted_at INTEGER
-    )`,
-
     `CREATE TABLE IF NOT EXISTS objects (
       hash TEXT PRIMARY KEY,
       kind TEXT NOT NULL,
@@ -25,32 +19,20 @@ export const migrate = async (client: Client): Promise<void> => {
       created_at INTEGER NOT NULL
     )`,
 
-    `CREATE TABLE IF NOT EXISTS revisions (
+    `CREATE TABLE IF NOT EXISTS files (
       id TEXT PRIMARY KEY,
-      entity_id TEXT NOT NULL,
       manifest_hash TEXT NOT NULL,
       byte_length INTEGER NOT NULL,
       created_at INTEGER NOT NULL,
-      source_kind TEXT NOT NULL,
-      metadata_json TEXT NOT NULL,
-      FOREIGN KEY (entity_id) REFERENCES entities(id),
       FOREIGN KEY (manifest_hash) REFERENCES objects(hash)
     )`,
 
-    `CREATE TABLE IF NOT EXISTS revision_parents (
-      revision_id TEXT NOT NULL,
-      parent_revision_id TEXT NOT NULL,
-      position INTEGER NOT NULL,
-      PRIMARY KEY (revision_id, parent_revision_id),
-      FOREIGN KEY (revision_id) REFERENCES revisions(id),
-      FOREIGN KEY (parent_revision_id) REFERENCES revisions(id)
+    `CREATE TABLE IF NOT EXISTS global_metadata (
+      key TEXT PRIMARY KEY,
+      value_json TEXT NOT NULL
     )`,
 
-    `CREATE TABLE IF NOT EXISTS entity_heads (
-      entity_id TEXT PRIMARY KEY,
-      revision_id TEXT NOT NULL,
-      FOREIGN KEY (entity_id) REFERENCES entities(id),
-      FOREIGN KEY (revision_id) REFERENCES revisions(id)
-    )`
+    `INSERT OR IGNORE INTO global_metadata (key, value_json)
+      VALUES ('store', '${initialStoreMetadata}')`
   ]);
 };

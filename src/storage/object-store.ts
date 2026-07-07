@@ -11,7 +11,7 @@ import {
   fsyncSync
 } from 'node:fs';
 import { dirname, join, relative, sep } from 'node:path';
-import type { ContentHash } from '../api/types.js';
+import type { ContentHash } from '../domain/manifest.js';
 
 export interface StoredObject {
   readonly hash: ContentHash;

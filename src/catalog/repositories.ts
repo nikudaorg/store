@@ -1,238 +1,166 @@
-import { and, asc, eq, isNull } from 'drizzle-orm';
+import { asc, eq } from 'drizzle-orm';
 import type { LibSQLDatabase } from 'drizzle-orm/libsql';
-import type {
-  ContentHash,
-  EntityId,
-  EntityRecord,
-  RevisionId,
-  RevisionRecord,
-  SourceKind
-} from '../api/types.js';
+import type { FileId, FileRecord } from '../api/types.js';
+import type { ContentHash } from '../domain/manifest.js';
 import type { StoredObject } from '../storage/object-store.js';
-import {
-  entities,
-  entityHeads,
-  objects,
-  revisionParents,
-  revisions,
-  schema
-} from './schema.js';
+import { files, globalMetadata, objects, schema } from './schema.js';
 
 type CatalogOrm = LibSQLDatabase<typeof schema>;
 type CatalogTransaction = Parameters<Parameters<CatalogOrm['transaction']>[0]>[0];
-type WritableCatalog = CatalogOrm | CatalogTransaction;
 
-export interface CreateEntityRevisionInput {
-  readonly entityId: EntityId;
-  readonly revisionId: RevisionId;
+interface CreateFileInput {
+  readonly id: FileId;
   readonly manifestHash: ContentHash;
   readonly byteLength: number;
   readonly createdAt: number;
-  readonly originalName?: string;
-  readonly mediaType?: string;
-  readonly entityMetadataJson: string;
-  readonly revisionMetadataJson: string;
-  readonly sourceKind: SourceKind;
   readonly objects: readonly StoredObject[];
 }
 
-export interface CommitEntityRevisionInput {
-  readonly entityId: EntityId;
-  readonly revisionId: RevisionId;
-  readonly previousHead: RevisionId;
-  readonly manifestHash: ContentHash;
-  readonly byteLength: number;
-  readonly createdAt: number;
-  readonly metadataJson: string;
-  readonly sourceKind: SourceKind;
-  readonly objects: readonly StoredObject[];
+interface StoreMetadataV1 {
+  readonly schema: 'storeMetadataV1';
+  readonly rootHistory: readonly {
+    readonly fileId: FileId;
+    readonly assignedAt: number;
+  }[];
 }
 
-const parseMetadata = (json: string): Record<string, unknown> =>
-  JSON.parse(json) as Record<string, unknown>;
+const storeMetadataKey = 'store';
+
+const parseStoreMetadata = (json: string): StoreMetadataV1 => {
+  const value = JSON.parse(json) as unknown;
+  if (
+    typeof value !== 'object' ||
+    value === null ||
+    !('schema' in value) ||
+    value.schema !== 'storeMetadataV1' ||
+    !('rootHistory' in value) ||
+    !Array.isArray(value.rootHistory) ||
+    !value.rootHistory.every(
+      (entry) =>
+        typeof entry === 'object' &&
+        entry !== null &&
+        'fileId' in entry &&
+        typeof entry.fileId === 'string' &&
+        'assignedAt' in entry &&
+        typeof entry.assignedAt === 'number'
+    )
+  ) {
+    throw Object.assign(new Error('Invalid global store metadata'), {
+      code: 'storeIntegrity' as const
+    });
+  }
+  return value as StoreMetadataV1;
+};
 
 export const createRepositories = (db: CatalogOrm) => {
-  const entityFromRow = (row: typeof entities.$inferSelect): EntityRecord => ({
+  const fileFromRow = (row: typeof files.$inferSelect): FileRecord => ({
     id: row.id,
-    createdAt: row.createdAt,
-    originalName: row.originalName ?? undefined,
-    mediaType: row.mediaType ?? undefined,
-    metadata: parseMetadata(row.metadataJson),
-    deletedAt: row.deletedAt ?? undefined
+    byteLength: row.byteLength,
+    createdAt: row.createdAt
   });
 
-  const parentsFor = async (revisionId: RevisionId): Promise<readonly RevisionId[]> =>
+  const getStoredFile = async (fileId: FileId) => {
+    const row = await db.query.files.findFirst({
+      where: eq(files.id, fileId)
+    });
+    if (row === undefined) {
+      throw Object.assign(new Error(`File ${fileId} was not found`), {
+        code: 'fileNotFound' as const
+      });
+    }
+    return row;
+  };
+
+  const listFiles = async (): Promise<readonly FileRecord[]> =>
     (
       await db
-        .select({ parentRevisionId: revisionParents.parentRevisionId })
-        .from(revisionParents)
-        .where(eq(revisionParents.revisionId, revisionId))
-        .orderBy(asc(revisionParents.position))
-    ).map((row) => row.parentRevisionId);
+        .select()
+        .from(files)
+        .orderBy(asc(files.createdAt), asc(files.id))
+    ).map(fileFromRow);
 
-  const revisionFromRow = async (
-    row: typeof revisions.$inferSelect
-  ): Promise<RevisionRecord> => ({
-    id: row.id,
-    entityId: row.entityId,
-    manifestHash: row.manifestHash,
-    byteLength: row.byteLength,
-    createdAt: row.createdAt,
-    sourceKind: row.sourceKind,
-    metadata: parseMetadata(row.metadataJson),
-    parents: await parentsFor(row.id)
-  });
-
-  const getEntity = async (entityId: EntityId): Promise<EntityRecord> => {
-    const row = await db.query.entities.findFirst({
-      where: and(eq(entities.id, entityId), isNull(entities.deletedAt))
-    });
-    if (row === undefined) {
-      throw Object.assign(new Error(`Entity ${entityId} was not found`), {
-        code: 'entityNotFound' as const
-      });
-    }
-    return entityFromRow(row);
-  };
-
-  const getHeadRevisionId = async (entityId: EntityId): Promise<RevisionId> => {
-    const row = await db.query.entityHeads.findFirst({
-      columns: { revisionId: true },
-      where: eq(entityHeads.entityId, entityId)
-    });
-    if (row === undefined) {
-      throw Object.assign(new Error(`Entity ${entityId} has no head`), {
-        code: 'revisionNotFound' as const
-      });
-    }
-    return row.revisionId;
-  };
-
-  const getRevision = async (
-    entityId: EntityId,
-    revision: RevisionId | 'head' = 'head'
-  ): Promise<RevisionRecord> => {
-    const revisionId = revision === 'head' ? await getHeadRevisionId(entityId) : revision;
-    const row = await db.query.revisions.findFirst({
-      where: and(eq(revisions.id, revisionId), eq(revisions.entityId, entityId))
-    });
-    if (row === undefined) {
-      throw Object.assign(
-        new Error(`Revision ${revisionId} was not found for ${entityId}`),
-        { code: 'revisionNotFound' as const }
-      );
-    }
-    return revisionFromRow(row);
-  };
-
-  const listRevisions = async (entityId: EntityId): Promise<RevisionRecord[]> => {
-    await getEntity(entityId);
-    const rows = await db
-      .select()
-      .from(revisions)
-      .where(eq(revisions.entityId, entityId))
-      .orderBy(asc(revisions.createdAt), asc(revisions.id));
-    return Promise.all(rows.map(revisionFromRow));
-  };
-
-  const insertObjects = async (
-    target: WritableCatalog,
-    storedObjects: readonly StoredObject[],
-    createdAt: number
-  ): Promise<void> => {
-    if (storedObjects.length === 0) {
-      return;
-    }
-    await target
-      .insert(objects)
-      .values(
-        storedObjects.map((object) => ({
-          hash: object.hash,
-          kind: object.kind,
-          rawLength: object.rawLength,
-          storedLength: object.storedLength,
-          codec: object.codec,
-          relativePath: object.relativePath,
-          createdAt
-        }))
-      )
-      .onConflictDoNothing({ target: objects.hash });
-  };
-
-  const createEntityRevision = async (
-    input: CreateEntityRevisionInput
-  ): Promise<void> => {
+  const createFile = async (input: CreateFileInput): Promise<void> => {
     await db.transaction(async (tx) => {
-      await insertObjects(tx, input.objects, input.createdAt);
-      await tx.insert(entities).values({
-        id: input.entityId,
-        createdAt: input.createdAt,
-        originalName: input.originalName,
-        mediaType: input.mediaType,
-        metadataJson: input.entityMetadataJson
-      });
-      await tx.insert(revisions).values({
-        id: input.revisionId,
-        entityId: input.entityId,
-        manifestHash: input.manifestHash,
-        byteLength: input.byteLength,
-        createdAt: input.createdAt,
-        sourceKind: input.sourceKind,
-        metadataJson: input.revisionMetadataJson
-      });
-      await tx.insert(entityHeads).values({
-        entityId: input.entityId,
-        revisionId: input.revisionId
-      });
-    });
-  };
-
-  const commitEntityRevision = async (
-    input: CommitEntityRevisionInput
-  ): Promise<void> => {
-    await db.transaction(async (tx) => {
-      await insertObjects(tx, input.objects, input.createdAt);
-      await tx.insert(revisions).values({
-        id: input.revisionId,
-        entityId: input.entityId,
-        manifestHash: input.manifestHash,
-        byteLength: input.byteLength,
-        createdAt: input.createdAt,
-        sourceKind: input.sourceKind,
-        metadataJson: input.metadataJson
-      });
-      await tx.insert(revisionParents).values({
-        revisionId: input.revisionId,
-        parentRevisionId: input.previousHead,
-        position: 0
-      });
       await tx
-        .update(entityHeads)
-        .set({ revisionId: input.revisionId })
-        .where(eq(entityHeads.entityId, input.entityId));
+        .insert(objects)
+        .values(
+          input.objects.map((object) => ({
+            hash: object.hash,
+            kind: object.kind,
+            rawLength: object.rawLength,
+            storedLength: object.storedLength,
+            codec: object.codec,
+            relativePath: object.relativePath,
+            createdAt: input.createdAt
+          }))
+        )
+        .onConflictDoNothing({ target: objects.hash });
+      await tx.insert(files).values({
+        id: input.id,
+        manifestHash: input.manifestHash,
+        byteLength: input.byteLength,
+        createdAt: input.createdAt
+      });
     });
   };
 
-  const allManifestHashes = async (
-    entityId?: EntityId
-  ): Promise<readonly ContentHash[]> => {
-    const rows =
-      entityId === undefined
-        ? await db.select({ manifestHash: revisions.manifestHash }).from(revisions)
-        : await db
-            .select({ manifestHash: revisions.manifestHash })
-            .from(revisions)
-            .where(eq(revisions.entityId, entityId));
-    return rows.map((row) => row.manifestHash);
+  const getStoreMetadata = async (
+    target: CatalogOrm | CatalogTransaction = db
+  ): Promise<StoreMetadataV1> => {
+    const row = await target
+      .select({ valueJson: globalMetadata.valueJson })
+      .from(globalMetadata)
+      .where(eq(globalMetadata.key, storeMetadataKey))
+      .get();
+    if (row === undefined) {
+      throw Object.assign(new Error('Global store metadata was not found'), {
+        code: 'storeIntegrity' as const
+      });
+    }
+    return parseStoreMetadata(row.valueJson);
+  };
+
+  const getRootFileId = async (): Promise<FileId> => {
+    const metadata = await getStoreMetadata();
+    const root = metadata.rootHistory.at(-1);
+    if (root === undefined) {
+      throw Object.assign(new Error('No root file has been assigned'), {
+        code: 'rootNotSet' as const
+      });
+    }
+    return root.fileId;
+  };
+
+  const setRoot = async (fileId: FileId, assignedAt: number): Promise<void> => {
+    await db.transaction(async (tx) => {
+      const file = await tx
+        .select({ id: files.id })
+        .from(files)
+        .where(eq(files.id, fileId))
+        .get();
+      if (file === undefined) {
+        throw Object.assign(new Error(`File ${fileId} was not found`), {
+          code: 'fileNotFound' as const
+        });
+      }
+
+      const metadata = await getStoreMetadata(tx);
+      const nextMetadata: StoreMetadataV1 = {
+        ...metadata,
+        rootHistory: [...metadata.rootHistory, { fileId, assignedAt }]
+      };
+      await tx
+        .update(globalMetadata)
+        .set({ valueJson: JSON.stringify(nextMetadata) })
+        .where(eq(globalMetadata.key, storeMetadataKey));
+    });
   };
 
   return {
-    getEntity,
-    getHeadRevisionId,
-    getRevision,
-    listRevisions,
-    createEntityRevision,
-    commitEntityRevision,
-    allManifestHashes
+    createFile,
+    getStoredFile,
+    listFiles,
+    getRootFileId,
+    setRoot
   };
 };

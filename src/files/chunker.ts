@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { Readable } from 'node:stream';
 
-export interface Chunk {
+export interface FileChunk {
   readonly bytes: Buffer;
   readonly hash: string;
   readonly length: number;
@@ -38,8 +38,8 @@ const windowSize = 64;
 export const chunkReadable = async (
   stream: NodeJS.ReadableStream,
   options: ChunkerOptions = defaultChunkerOptions
-): Promise<readonly Chunk[]> => {
-  const chunks: Chunk[] = [];
+): Promise<readonly FileChunk[]> => {
+  const chunks: FileChunk[] = [];
   const current: Buffer[] = [];
   const mask = boundaryMask(options.targetSize);
   const window = new Uint8Array(windowSize);

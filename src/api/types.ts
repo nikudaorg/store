@@ -1,6 +1,4 @@
-export type EntityId = string;
-export type RevisionId = string;
-export type ContentHash = string;
+export type FileId = string;
 
 export type ContentSource =
   | { readonly type: 'path'; readonly path: string }
@@ -8,128 +6,36 @@ export type ContentSource =
   | { readonly type: 'text'; readonly text: string; readonly encoding?: 'utf-8' }
   | { readonly type: 'stream'; readonly stream: NodeJS.ReadableStream };
 
-export type SourceKind = 'api' | 'import' | 'materializedFile';
-
-export interface CreateEntityInput {
-  readonly content: ContentSource;
-  readonly originalName?: string;
-  readonly mediaType?: string;
-  readonly metadata?: Record<string, unknown>;
-}
-
-export interface CreateEntityResult {
-  readonly entityId: EntityId;
-  readonly revisionId: RevisionId;
-}
-
-export interface CommitRevisionInput {
-  readonly entityId: EntityId;
-  readonly content: ContentSource;
-  readonly expectedHead?: RevisionId;
-  readonly metadata?: Record<string, unknown>;
-  readonly sourceKind?: SourceKind;
-}
-
-export interface CommitRevisionResult {
-  readonly revisionId: RevisionId;
-  readonly previousHead: RevisionId;
-}
-
-export interface EntityRecord {
-  readonly id: EntityId;
-  readonly createdAt: number;
-  readonly originalName?: string;
-  readonly mediaType?: string;
-  readonly metadata: Record<string, unknown>;
-  readonly deletedAt?: number;
-}
-
-export interface RevisionRecord {
-  readonly id: RevisionId;
-  readonly entityId: EntityId;
-  readonly manifestHash: ContentHash;
+export interface FileRecord {
+  readonly id: FileId;
   readonly byteLength: number;
   readonly createdAt: number;
-  readonly sourceKind: SourceKind;
-  readonly metadata: Record<string, unknown>;
-  readonly parents: readonly RevisionId[];
-}
-
-export interface MaterializeInput {
-  readonly entityId: EntityId;
-  readonly revision?: RevisionId | 'head';
-  readonly destinationPath: string;
-  readonly overwrite?: boolean;
-}
-
-export interface VerifyInput {
-  readonly entityId?: EntityId;
-}
-
-export type VerifyIssue =
-  | {
-      readonly kind: 'missingObject';
-      readonly hash: ContentHash;
-      readonly path: string;
-    }
-  | {
-      readonly kind: 'corruptObject';
-      readonly hash: ContentHash;
-      readonly path: string;
-    }
-  | {
-      readonly kind: 'lengthMismatch';
-      readonly revisionId: RevisionId;
-      readonly expected: number;
-      readonly actual: number;
-    };
-
-export interface VerifyResult {
-  readonly ok: boolean;
-  readonly issues: readonly VerifyIssue[];
 }
 
 export interface Connection {
-  /** Creates an entity and its initial revision from the supplied content. */
-  readonly create: (input: CreateEntityInput) => Promise<CreateEntityResult>;
+  /** Stores a new immutable file and returns its ID. */
+  readonly create: (content: ContentSource) => Promise<FileId>;
 
-  /** Creates a new immutable revision and updates the entity's current head. */
-  readonly commit: (
-    input: CommitRevisionInput
-  ) => Promise<CommitRevisionResult>;
+  /** Opens an immutable file as a readable stream. */
+  readonly read: (fileId: FileId) => Promise<NodeJS.ReadableStream>;
 
-  /** Returns the metadata and current state of an entity. */
-  readonly getEntity: (entityId: EntityId) => Promise<EntityRecord>;
+  /** Reads an immutable file fully into memory. */
+  readonly readBytes: (fileId: FileId) => Promise<Uint8Array>;
 
-  /** Returns a specific revision, or the entity's current head by default. */
-  readonly getRevision: (
-    entityId: EntityId,
-    revision?: RevisionId | 'head'
-  ) => Promise<RevisionRecord>;
+  /** Lists every stored file in creation order. */
+  readonly listFiles: () => Promise<readonly FileRecord[]>;
 
-  /** Returns the revisions belonging to an entity. */
-  readonly listRevisions: (entityId: EntityId) => Promise<RevisionRecord[]>;
+  /** Assigns a stored file as the global root and records the assignment. */
+  readonly setRoot: (fileId: FileId) => Promise<void>;
 
-  /** Opens a readable stream for a specific revision or the current head. */
-  readonly openRead: (
-    entityId: EntityId,
-    revision?: RevisionId | 'head'
-  ) => Promise<NodeJS.ReadableStream>;
+  /** Opens the current root file as a readable stream. */
+  readonly readRoot: () => Promise<NodeJS.ReadableStream>;
 
-  /** Reads a specific revision or the current head fully into memory. */
-  readonly readBytes: (
-    entityId: EntityId,
-    revision?: RevisionId | 'head'
-  ) => Promise<Uint8Array>;
-
-  /** Reconstructs a revision and writes it to the requested filesystem path. */
-  readonly materializeToPath: (input: MaterializeInput) => Promise<void>;
-
-  /** Checks stored metadata and content objects for integrity problems. */
-  readonly verify: (input?: VerifyInput) => Promise<VerifyResult>;
+  /** Reads the current root file fully into memory. */
+  readonly readBytesRoot: () => Promise<Uint8Array>;
 }
 
-export interface CreateVersionedEntityStoreOptions {
+export interface CreateFileStoreOptions {
   readonly root: string;
   readonly readBytesLimit?: number;
 }

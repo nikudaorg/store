@@ -2,7 +2,7 @@ import { randomBytes } from 'node:crypto';
 
 const alphabet = 'abcdefghijklmnopqrstuvwxyz234567';
 
-export const createRandomId = (prefix: 'ent' | 'rev'): string => {
+export const createRandomId = (): string => {
   const bytes = randomBytes(20);
   let bits = 0;
   let value = 0;
@@ -21,5 +21,5 @@ export const createRandomId = (prefix: 'ent' | 'rev'): string => {
     output += alphabet[(value << (5 - bits)) & 31];
   }
 
-  return `${prefix}_${output}`;
+  return `file_${output}`;
 };
